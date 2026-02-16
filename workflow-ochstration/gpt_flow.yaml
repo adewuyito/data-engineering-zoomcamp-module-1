@@ -1,0 +1,198 @@
+id: nyc_taxi_2024_load
+namespace: zoomcamp
+description: |
+  Load 2024 NYC Yellow Taxi data from official NYC TLC website.
+  Data is in Parquet format from: https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
+  CloudFront URL: https://d37ci6vzurychx.cloudfront.net/trip-data/
+
+inputs:
+  - id: taxi
+    type: SELECT
+    displayName: Select taxi type
+    values: [ yellow, green ]
+    defaults: yellow
+  
+  - id: year
+    type: STRING
+    displayName: Year
+    defaults: "2024"
+  
+  - id: month
+    type: SELECT
+    displayName: Select month (or 'all' for entire year)
+    values: [ "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "all" ]
+    defaults: "all"
+
+variables:
+  file: "{{inputs.taxi}}_tripdata_{{inputs.year}}-{{inputs.month}}.parquet"
+  gcs_path: "nyc-taxi-{{inputs.year}}/{{inputs.taxi}}"
+  gcs_file: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.gcs_path}}/{{vars.file}}"
+  base_url: "https://d37ci6vzurychx.cloudfront.net/trip-data"
+  final_table: "{{kv('GCP_DATASET')}}.{{inputs.taxi}}_tripdata_{{inputs.year}}"
+
+tasks:
+  - id: set_label
+    type: io.kestra.plugin.core.execution.Labels
+    labels:
+      year: "{{inputs.year}}"
+      taxi: "{{inputs.taxi}}"
+      month: "{{inputs.month}}"
+
+  # If month is "all", download all 12 months
+  - id: download_all_months
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{inputs.month == 'all'}}"
+    then:
+      - id: download_yearly_data
+        type: io.kestra.plugin.core.flow.ForEach
+        values: ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"]
+        tasks:
+          - id: download_month
+            type: io.kestra.plugin.scripts.shell.Commands
+            outputFiles:
+              - "*.parquet"
+            taskRunner:
+              type: io.kestra.plugin.core.runner.Process
+            commands:
+              - |
+                FILE="{{inputs.taxi}}_tripdata_{{inputs.year}}-{{taskrun.value}}.parquet"
+                URL="{{vars.base_url}}/${FILE}"
+                echo "Downloading ${FILE} from ${URL}"
+                wget -q "${URL}" -O "${FILE}"
+                ls -lh "${FILE}"
+          
+          - id: upload_month_to_gcs
+            type: io.kestra.plugin.gcp.gcs.Upload
+            from: "{{outputs.download_month.outputFiles['{{inputs.taxi}}_tripdata_{{inputs.year}}-{{taskrun.value}}.parquet']}}"
+            to: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.gcs_path}}/{{inputs.taxi}}_tripdata_{{inputs.year}}-{{taskrun.value}}.parquet"
+    
+    # If specific month is selected, download just that month
+    else:
+      - id: download_single_month
+        type: io.kestra.plugin.scripts.shell.Commands
+        outputFiles:
+          - "*.parquet"
+        taskRunner:
+          type: io.kestra.plugin.core.runner.Process
+        commands:
+          - |
+            FILE="{{render(vars.file)}}"
+            URL="{{vars.base_url}}/${FILE}"
+            echo "Downloading ${FILE} from ${URL}"
+            wget -q "${URL}" -O "${FILE}"
+            ls -lh "${FILE}"
+      
+      - id: upload_single_to_gcs
+        type: io.kestra.plugin.gcp.gcs.Upload
+        from: "{{outputs.download_single_month.outputFiles[inputs.taxi ~ '_tripdata_' ~ inputs.year ~ '-' ~ inputs.month ~ '.parquet']}}"
+        to: "{{render(vars.gcs_file)}}"
+
+  # Create BigQuery tables based on taxi type
+  - id: if_yellow_taxi
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{inputs.taxi == 'yellow'}}"
+    then:
+      - id: create_yellow_table
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          CREATE TABLE IF NOT EXISTS `{{kv('GCP_PROJECT_ID')}}.{{render(vars.final_table)}}`
+          (
+              VendorID INT64 OPTIONS (description = 'A code indicating the TPEP provider that provided the record. 1= Creative Mobile Technologies, LLC; 2= VeriFone Inc.'),
+              tpep_pickup_datetime TIMESTAMP OPTIONS (description = 'The date and time when the meter was engaged'),
+              tpep_dropoff_datetime TIMESTAMP OPTIONS (description = 'The date and time when the meter was disengaged'),
+              passenger_count INT64 OPTIONS (description = 'The number of passengers in the vehicle. This is a driver-entered value.'),
+              trip_distance FLOAT64 OPTIONS (description = 'The elapsed trip distance in miles reported by the taximeter.'),
+              RatecodeID INT64 OPTIONS (description = 'The final rate code in effect at the end of the trip. 1= Standard rate 2=JFK 3=Newark 4=Nassau or Westchester 5=Negotiated fare 6=Group ride'),
+              store_and_fwd_flag STRING OPTIONS (description = 'This flag indicates whether the trip record was held in vehicle memory before sending to the vendor. Y= store and forward trip N= not a store and forward trip'),
+              PULocationID INT64 OPTIONS (description = 'TLC Taxi Zone in which the taximeter was engaged'),
+              DOLocationID INT64 OPTIONS (description = 'TLC Taxi Zone in which the taximeter was disengaged'),
+              payment_type INT64 OPTIONS (description = 'A numeric code signifying how the passenger paid for the trip. 1= Credit card 2= Cash 3= No charge 4= Dispute 5= Unknown 6= Voided trip'),
+              fare_amount FLOAT64 OPTIONS (description = 'The time-and-distance fare calculated by the meter'),
+              extra FLOAT64 OPTIONS (description = 'Miscellaneous extras and surcharges. Currently, this only includes the $0.50 and $1 rush hour and overnight charges'),
+              mta_tax FLOAT64 OPTIONS (description = '$0.50 MTA tax that is automatically triggered based on the metered rate in use'),
+              tip_amount FLOAT64 OPTIONS (description = 'Tip amount. This field is automatically populated for credit card tips. Cash tips are not included.'),
+              tolls_amount FLOAT64 OPTIONS (description = 'Total amount of all tolls paid in trip.'),
+              improvement_surcharge FLOAT64 OPTIONS (description = '$0.30 improvement surcharge assessed on hailed trips at the flag drop. The improvement surcharge began being levied in 2015.'),
+              total_amount FLOAT64 OPTIONS (description = 'The total amount charged to passengers. Does not include cash tips.'),
+              congestion_surcharge FLOAT64 OPTIONS (description = 'Congestion surcharge applied to trips in congested zones'),
+              airport_fee FLOAT64 OPTIONS (description = '$1.25 for pick up only at LaGuardia and John F. Kennedy Airports')
+          )
+          PARTITION BY DATE(tpep_pickup_datetime)
+          CLUSTER BY PULocationID, DOLocationID;
+
+      - id: load_yellow_from_gcs
+        type: io.kestra.plugin.gcp.bigquery.Load
+        from: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.gcs_path}}/*.parquet"
+        destinationTable: "{{kv('GCP_PROJECT_ID')}}.{{render(vars.final_table)}}"
+        format: PARQUET
+        writeDisposition: WRITE_APPEND
+        autodetect: false
+
+  - id: if_green_taxi
+    type: io.kestra.plugin.core.flow.If
+    condition: "{{inputs.taxi == 'green'}}"
+    then:
+      - id: create_green_table
+        type: io.kestra.plugin.gcp.bigquery.Query
+        sql: |
+          CREATE TABLE IF NOT EXISTS `{{kv('GCP_PROJECT_ID')}}.{{render(vars.final_table)}}`
+          (
+              VendorID INT64 OPTIONS (description = 'A code indicating the LPEP provider that provided the record. 1= Creative Mobile Technologies, LLC; 2= VeriFone Inc.'),
+              lpep_pickup_datetime TIMESTAMP OPTIONS (description = 'The date and time when the meter was engaged'),
+              lpep_dropoff_datetime TIMESTAMP OPTIONS (description = 'The date and time when the meter was disengaged'),
+              store_and_fwd_flag STRING OPTIONS (description = 'This flag indicates whether the trip record was held in vehicle memory before sending to the vendor. Y= store and forward trip N= not a store and forward trip'),
+              RatecodeID INT64 OPTIONS (description = 'The final rate code in effect at the end of the trip. 1= Standard rate 2=JFK 3=Newark 4=Nassau or Westchester 5=Negotiated fare 6=Group ride'),
+              PULocationID INT64 OPTIONS (description = 'TLC Taxi Zone in which the taximeter was engaged'),
+              DOLocationID INT64 OPTIONS (description = 'TLC Taxi Zone in which the taximeter was disengaged'),
+              passenger_count INT64 OPTIONS (description = 'The number of passengers in the vehicle. This is a driver-entered value.'),
+              trip_distance FLOAT64 OPTIONS (description = 'The elapsed trip distance in miles reported by the taximeter.'),
+              fare_amount FLOAT64 OPTIONS (description = 'The time-and-distance fare calculated by the meter'),
+              extra FLOAT64 OPTIONS (description = 'Miscellaneous extras and surcharges. Currently, this only includes the $0.50 and $1 rush hour and overnight charges'),
+              mta_tax FLOAT64 OPTIONS (description = '$0.50 MTA tax that is automatically triggered based on the metered rate in use'),
+              tip_amount FLOAT64 OPTIONS (description = 'Tip amount. This field is automatically populated for credit card tips. Cash tips are not included.'),
+              tolls_amount FLOAT64 OPTIONS (description = 'Total amount of all tolls paid in trip.'),
+              ehail_fee FLOAT64,
+              improvement_surcharge FLOAT64 OPTIONS (description = '$0.30 improvement surcharge assessed on hailed trips at the flag drop. The improvement surcharge began being levied in 2015.'),
+              total_amount FLOAT64 OPTIONS (description = 'The total amount charged to passengers. Does not include cash tips.'),
+              payment_type INT64 OPTIONS (description = 'A numeric code signifying how the passenger paid for the trip. 1= Credit card 2= Cash 3= No charge 4= Dispute 5= Unknown 6= Voided trip'),
+              trip_type INT64 OPTIONS (description = 'A code indicating whether the trip was a street-hail or a dispatch that is automatically assigned based on the metered rate in use but can be altered by the driver. 1= Street-hail 2= Dispatch'),
+              congestion_surcharge FLOAT64 OPTIONS (description = 'Congestion surcharge applied to trips in congested zones')
+          )
+          PARTITION BY DATE(lpep_pickup_datetime)
+          CLUSTER BY PULocationID, DOLocationID;
+
+      - id: load_green_from_gcs
+        type: io.kestra.plugin.gcp.bigquery.Load
+        from: "gs://{{kv('GCP_BUCKET_NAME')}}/{{vars.gcs_path}}/*.parquet"
+        destinationTable: "{{kv('GCP_PROJECT_ID')}}.{{render(vars.final_table)}}"
+        format: PARQUET
+        writeDisposition: WRITE_APPEND
+        autodetect: false
+
+  - id: log_completion
+    type: io.kestra.plugin.core.log.Log
+    message: |
+      Successfully loaded {{inputs.taxi}} taxi data for {{inputs.year}}-{{inputs.month}} 
+      to table: {{render(vars.final_table)}}
+
+  - id: purge_files
+    type: io.kestra.plugin.core.storage.PurgeCurrentExecutionFiles
+    description: Remove downloaded files to avoid cluttering storage
+
+pluginDefaults:
+  - type: io.kestra.plugin.gcp
+    values:
+      serviceAccount: "{{secret('GCP_SERVICE_ACCOUNT')}}"
+      projectId: "{{kv('GCP_PROJECT_ID')}}"
+      location: "{{kv('GCP_LOCATION')}}"
+      bucket: "{{kv('GCP_BUCKET_NAME')}}"
+
+# Optional: Uncomment to schedule monthly runs
+# triggers:
+#   - id: monthly_yellow_2024
+#     type: io.kestra.plugin.core.trigger.Schedule
+#     cron: "0 9 5 * *"  # Run on 5th of each month at 9 AM
+#     inputs:
+#       taxi: yellow
+#       year: "2024"
+#       month: "all"
