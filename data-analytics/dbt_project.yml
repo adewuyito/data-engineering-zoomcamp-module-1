@@ -6,6 +6,9 @@ name: 'ny_taxi_rides'
 version: '1.0.0'
 config-version: 2
 
+dbt-cloud:
+    project-id: 70471823553215
+
 # This setting configures which "profile" dbt uses for this project.
 profile: 'default'
 
@@ -23,6 +26,8 @@ target-path: "target"  # directory which will store compiled SQL files
 clean-targets:         # directories to be removed by `dbt clean`
   - "target"
   - "dbt_packages"
+
+
 
 
 # Configuring models
