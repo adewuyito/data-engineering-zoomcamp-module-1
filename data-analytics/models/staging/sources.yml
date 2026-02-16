@@ -3,6 +3,7 @@ version: 2
 sources:
   - name: ny_taxi_data
     database: massive-acrobat-485409-v0
+    description: Raw data dotten from bigquery
     schema: zoomcamp
     tables:
       - name: yellow_tripdata

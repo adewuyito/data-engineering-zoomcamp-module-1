@@ -1,9 +1,9 @@
 with source as (
     select *
     from {{source("ny_taxi_data", "green_tripdata")}}
-)
+),
 
-
+renamed as (
     select
         -- identifiers
         cast(vendorid as integer) as vendor_id,
@@ -34,3 +34,6 @@ with source as (
     from source
     -- Filter out records with null vendor_id (data quality requirement)
     where vendorid is not null
+)
+
+select * from renamed

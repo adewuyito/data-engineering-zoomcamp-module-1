@@ -1,9 +1,9 @@
 with source as (
     select *
     from {{source("ny_taxi_data", "yellow_tripdata")}}
-)
+),
 
-
+renamed as (
     select
         -- identifiers (standardized naming for consistency across yellow/green)
         cast(vendorid as integer) as vendor_id,
@@ -19,6 +19,7 @@ with source as (
         cast(store_and_fwd_flag as string) as store_and_fwd_flag,
         cast(passenger_count as integer) as passenger_count,
         cast(trip_distance as numeric) as trip_distance,
+        1 as trip_type, -- Yellow taxis can only be hailed
 
         -- payment info
         cast(fare_amount as numeric) as fare_amount,
@@ -27,9 +28,13 @@ with source as (
         cast(tip_amount as numeric) as tip_amount,
         cast(tolls_amount as numeric) as tolls_amount,
         cast(improvement_surcharge as numeric) as improvement_surcharge,
+        0 as ehail_fee, -- No trip fee charged on hail
         cast(total_amount as numeric) as total_amount,
         cast(payment_type as integer) as payment_type
 
     from source
     -- Filter out records with null vendor_id (data quality requirement)
     where vendorid is not null
+)
+
+select * from renamed
