@@ -355,3 +355,5 @@ dmypy.json
 
 # Cloud secerte
 workflow-ochstration/service-account.json
+.bruin.yml
+logs/runs
